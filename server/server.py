@@ -18,6 +18,12 @@ app.config["ACS_DEV_TUNNEL"] = os.getenv("ACS_DEV_TUNNEL", "")
 app.config["AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID"] = os.getenv(
     "AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID", ""
 )
+# Email configuration
+app.config["SMTP_SERVER"] = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+app.config["SMTP_PORT"] = os.getenv("SMTP_PORT", "587")
+app.config["SMTP_USERNAME"] = os.getenv("SMTP_USERNAME", "")
+app.config["SMTP_PASSWORD"] = os.getenv("SMTP_PASSWORD", "")
+app.config["FROM_EMAIL"] = os.getenv("FROM_EMAIL", os.getenv("SMTP_USERNAME", ""))
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s"

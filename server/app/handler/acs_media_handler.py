@@ -5,7 +5,9 @@ import base64
 import json
 import logging
 import uuid
+from datetime import datetime
 
+from app.services.email_service import EmailService
 from azure.identity.aio import ManagedIdentityCredential
 from websockets.asyncio.client import connect as ws_connect
 from websockets.typing import Data
@@ -18,7 +20,12 @@ def session_config():
     return {
         "type": "session.update",
         "session": {
-            "instructions": "You are a helpful AI assistant responding in natural, engaging language.",
+            "instructions": (
+                "You are a helpful AI assistant responding in natural, engaging language. "
+                "When the user indicates they want to end the call or when the conversation naturally concludes, "
+                "use the send_email_summary tool to send a summary of the conversation to their email address. "
+                "Ask for their email address if they haven't provided it yet."
+            ),
             "turn_detection": {
                 "type": "azure_semantic_vad",
                 "threshold": 0.3,
@@ -38,6 +45,31 @@ def session_config():
                 "type": "azure-standard",
                 "temperature": 0.8,
             },
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "send_email_summary",
+                    "description": (
+                        "Sends an email with a summary of the call conversation. "
+                        "Use this when the user requests a summary or when the call is ending."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "email": {
+                                "type": "string",
+                                "description": "The recipient's email address",
+                            },
+                            "summary": {
+                                "type": "string",
+                                "description": "A concise summary of the call conversation including key points discussed",
+                            },
+                        },
+                        "required": ["email", "summary"],
+                    },
+                }
+            ],
+            "tool_choice": "auto",
         },
     }
 
@@ -55,6 +87,11 @@ class ACSMediaHandler:
         self.send_task = None
         self.incoming_websocket = None
         self.is_raw_audio = True
+        self.config = config
+        self.email_service = EmailService(config)
+        self.session_id = None
+        self.conversation_transcript = []
+        self.call_start_time = datetime.now()
 
     def _generate_guid(self):
         return str(uuid.uuid4())
@@ -125,6 +162,7 @@ class ACSMediaHandler:
                 match event_type:
                     case "session.created":
                         session_id = event.get("session", {}).get("id")
+                        self.session_id = session_id
                         logger.info("[VoiceLiveACSHandler] Session ID: %s", session_id)
 
                     case "input_audio_buffer.cleared":
@@ -143,10 +181,17 @@ class ACSMediaHandler:
                     case "conversation.item.input_audio_transcription.completed":
                         transcript = event.get("transcript")
                         logger.info("User: %s", transcript)
+                        self.conversation_transcript.append(
+                            {"role": "user", "content": transcript}
+                        )
 
                     case "conversation.item.input_audio_transcription.failed":
                         error_msg = event.get("error")
                         logger.warning("Transcription Error: %s", error_msg)
+
+                    case "response.function_call_arguments.done":
+                        # Handle function call completion
+                        await self._handle_function_call(event)
 
                     case "response.done":
                         response = event.get("response", {})
@@ -160,6 +205,9 @@ class ACSMediaHandler:
                     case "response.audio_transcript.done":
                         transcript = event.get("transcript")
                         logger.info("AI: %s", transcript)
+                        self.conversation_transcript.append(
+                            {"role": "assistant", "content": transcript}
+                        )
                         await self.send_message(
                             json.dumps({"Kind": "Transcription", "Text": transcript})
                         )
@@ -221,3 +269,58 @@ class ACSMediaHandler:
         """Encodes raw audio bytes and sends to Voice Live API."""
         audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
         await self.audio_to_voicelive(audio_b64)
+
+    async def _handle_function_call(self, event):
+        """Handles function call events from Voice Live API."""
+        try:
+            call_id = event.get("call_id")
+            name = event.get("name")
+            arguments = event.get("arguments")
+
+            logger.info(
+                "Function call received: %s with arguments: %s", name, arguments
+            )
+
+            if name == "send_email_summary":
+                # Parse arguments
+                args = json.loads(arguments) if isinstance(arguments, str) else arguments
+                email = args.get("email")
+                summary = args.get("summary")
+
+                # Send email
+                success = await self.email_service.send_email_summary(
+                    to_email=email,
+                    subject="Call Summary",
+                    summary=summary,
+                    call_id=self.session_id,
+                )
+
+                # Send function call output back to Voice Live
+                output_event = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(
+                            {
+                                "success": success,
+                                "message": (
+                                    "Email sent successfully"
+                                    if success
+                                    else "Failed to send email"
+                                ),
+                            }
+                        ),
+                    },
+                }
+                await self._send_json(output_event)
+
+                # Request a new response from the assistant
+                await self._send_json({"type": "response.create"})
+
+                logger.info("Email summary function executed: success=%s", success)
+            else:
+                logger.warning("Unknown function call: %s", name)
+
+        except Exception:
+            logger.exception("Error handling function call")
