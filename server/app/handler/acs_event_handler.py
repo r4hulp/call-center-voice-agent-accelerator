@@ -5,11 +5,13 @@ import logging
 import uuid
 from urllib.parse import urlencode, urlparse, urlunparse
 
-from azure.communication.callautomation import (AudioFormat,
-                                                MediaStreamingAudioChannelType,
-                                                MediaStreamingContentType,
-                                                MediaStreamingOptions,
-                                                StreamingTransportType)
+from azure.communication.callautomation import (
+    AudioFormat,
+    MediaStreamingAudioChannelType,
+    MediaStreamingContentType,
+    MediaStreamingOptions,
+    StreamingTransportType,
+)
 from azure.communication.callautomation.aio import CallAutomationClient
 from azure.eventgrid import EventGridEvent, SystemEventNames
 from quart import Response
@@ -21,9 +23,7 @@ class AcsEventHandler:
     """Handles ACS event processing and call answering logic."""
 
     def __init__(self, config):
-        self.acs_client = CallAutomationClient.from_connection_string(
-            config["ACS_CONNECTION_STRING"]
-        )
+        self.connection_string = config["ACS_CONNECTION_STRING"]
 
     async def process_incoming_call(self, events: list, host_url, config):
         """Processes incoming call events and answers calls with media streaming."""
@@ -84,7 +84,11 @@ class AcsEventHandler:
                     audio_format=AudioFormat.PCM24_K_MONO,
                 )
 
-                result = await self.acs_client.answer_call(
+                # Create a new client instance for each call to avoid shared state issues
+                acs_client = CallAutomationClient.from_connection_string(
+                    self.connection_string
+                )
+                result = await acs_client.answer_call(
                     incoming_call_context=incoming_call_context,
                     operation_context="incomingCall",
                     callback_url=callback_uri,
@@ -100,6 +104,9 @@ class AcsEventHandler:
 
     async def process_callback_events(self, context_id: str, raw_events: list, config):
         """Processes ACS callback events such as call connected, media started, etc."""
+        # Create a new client instance for this callback processing
+        acs_client = CallAutomationClient.from_connection_string(self.connection_string)
+
         for event in raw_events:
             event_data = event["data"]
             call_connection_id = event_data["callConnectionId"]
@@ -112,7 +119,7 @@ class AcsEventHandler:
             )
 
             if event["type"] == "Microsoft.Communication.CallConnected":
-                properties = await self.acs_client.get_call_connection(
+                properties = await acs_client.get_call_connection(
                     call_connection_id
                 ).get_call_properties()
 
