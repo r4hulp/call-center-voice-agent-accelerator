@@ -1,7 +1,7 @@
 """Helper functions for initializing and managing tools."""
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.tools import ToolRegistry
 from app.tools.appointment_booking import AppointmentBookingTool
@@ -12,7 +12,7 @@ from app.tools.order_status import OrderStatusTool
 logger = logging.getLogger(__name__)
 
 
-def create_tool_registry(config: Dict[str, Any], session_id: str = None) -> ToolRegistry:
+def create_tool_registry(config: Dict[str, Any], session_id: Optional[str] = None) -> ToolRegistry:
     """
     Create and populate a tool registry with all available tools.
 

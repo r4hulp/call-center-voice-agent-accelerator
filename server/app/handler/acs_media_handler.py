@@ -218,6 +218,7 @@ class ACSMediaHandler:
 
     async def _handle_function_call(self, event):
         """Handles function call events from Voice Live API."""
+        call_id = None
         try:
             call_id = event.get("call_id")
             name = event.get("name")
@@ -251,18 +252,19 @@ class ACSMediaHandler:
 
         except ValueError as e:
             logger.error("Tool not found: %s", str(e))
-            # Send error response back to Voice Live
-            output_event = {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": json.dumps(
-                        {"success": False, "message": f"Tool not found: {name}"}
-                    ),
-                },
-            }
-            await self._send_json(output_event)
-            await self._send_json({"type": "response.create"})
+            # Send error response back to Voice Live if we have a call_id
+            if call_id:
+                output_event = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(
+                            {"success": False, "message": f"Tool not found: {event.get('name', 'unknown')}"}
+                        ),
+                    },
+                }
+                await self._send_json(output_event)
+                await self._send_json({"type": "response.create"})
         except Exception:
             logger.exception("Error handling function call")

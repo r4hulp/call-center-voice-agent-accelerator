@@ -3,7 +3,6 @@
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict
-import random
 
 from app.tools import BaseTool
 
