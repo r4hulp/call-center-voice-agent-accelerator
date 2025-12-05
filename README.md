@@ -27,6 +27,8 @@ This sample demonstrates how to build a real-time voice agent using the [Azure S
 The solution includes:
 - A backend service that connects to the **Voice Live API** for real-time ASR, LLM and TTS
 - Two client options: **Web browser** (microphone/speaker) and **Azure Communication Services (ACS)** phone calls
+- **Tool calling capabilities** - Enable the AI agent to perform actions like sending emails, booking appointments, looking up information, and checking order status
+- **Modular tool system** - Easy to add new tools with a simple registry pattern
 - Flexible configuration to customize prompts, ASR, TTS, and behavior
 - Easy extension to other client types such as [Audiohook](https://learn.microsoft.com/azure/ai-services/speech-service/how-to-use-audiohook)
 
@@ -234,6 +236,45 @@ Once your event subscription is configured and the phone number is active:
 Once the environment has been deployed with `azd up` you can also run the application locally.
 
 Please follow the instructions in [the instructions in `service`](./service/README.md)
+
+<br/>
+
+## Tool Calling
+
+The voice agent supports **tool calling**, enabling it to perform actions during conversations. The solution comes with several built-in tools and a modular system for easily adding more.
+
+### Built-in Tools (Demo/Mock Implementations)
+
+All tools are currently implemented as **mock/simulation** versions for demonstration purposes. They log their actions instead of performing real operations. This makes them safe to test without requiring external service configuration.
+
+1. **Email Summary** - Simulates sending call summaries via email (logs to console)
+2. **Appointment Booking** - Simulates scheduling appointments for customers
+3. **Knowledge Base Lookup** - Retrieves information from a mock knowledge base
+4. **Order Status Check** - Simulates checking customer order status and tracking
+
+> **Note**: In a production environment, you would replace these mock implementations with actual integrations to email services, calendar APIs, databases, etc. See the [tool development guide](./server/app/tools/README.md) for details on implementing real integrations.
+
+### Adding New Tools
+
+The tool system is designed for easy extension. To add a new tool:
+
+1. Create a new Python file in `server/app/tools/` (e.g., `my_tool.py`)
+2. Implement a class that inherits from `BaseTool`
+3. Register it in `server/app/tools/utils.py`
+
+See the [detailed guide](./server/app/tools/README.md) for step-by-step instructions and examples.
+
+### How Tools Work
+
+During a conversation, the AI agent automatically:
+1. Detects when a tool should be used based on the conversation context
+2. Extracts necessary parameters from the conversation
+3. Executes the tool
+4. Incorporates the result into its response
+
+For example:
+- Customer: "Can you send me a summary of this call to john@example.com?"
+- Agent: *Calls `send_email_summary` tool* → "I've sent a summary to your email."
 
 <br/>
 

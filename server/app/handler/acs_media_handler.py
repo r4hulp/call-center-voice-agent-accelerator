@@ -5,41 +5,14 @@ import base64
 import json
 import logging
 import uuid
+from datetime import datetime
 
+from app.tools.utils import create_tool_registry, get_session_config_with_tools
 from azure.identity.aio import ManagedIdentityCredential
 from websockets.asyncio.client import connect as ws_connect
 from websockets.typing import Data
 
 logger = logging.getLogger(__name__)
-
-
-def session_config():
-    """Returns the default session configuration for Voice Live."""
-    return {
-        "type": "session.update",
-        "session": {
-            "instructions": "You are a helpful AI assistant responding in natural, engaging language.",
-            "turn_detection": {
-                "type": "azure_semantic_vad",
-                "threshold": 0.3,
-                "prefix_padding_ms": 200,
-                "silence_duration_ms": 200,
-                "remove_filler_words": False,
-                "end_of_utterance_detection": {
-                    "model": "semantic_detection_v1",
-                    "threshold": 0.01,
-                    "timeout": 2,
-                },
-            },
-            "input_audio_noise_reduction": {"type": "azure_deep_noise_suppression"},
-            "input_audio_echo_cancellation": {"type": "server_echo_cancellation"},
-            "voice": {
-                "name": "en-US-Aria:DragonHDLatestNeural",
-                "type": "azure-standard",
-                "temperature": 0.8,
-            },
-        },
-    }
 
 
 class ACSMediaHandler:
@@ -55,6 +28,11 @@ class ACSMediaHandler:
         self.send_task = None
         self.incoming_websocket = None
         self.is_raw_audio = True
+        self.config = config
+        self.session_id = None
+        self.conversation_transcript = []
+        self.call_start_time = datetime.now()
+        self.tool_registry = None
 
     def _generate_guid(self):
         return str(uuid.uuid4())
@@ -83,7 +61,12 @@ class ACSMediaHandler:
         self.ws = await ws_connect(url, additional_headers=headers)
         logger.info("[VoiceLiveACSHandler] Connected to Voice Live API")
 
-        await self._send_json(session_config())
+        # Initialize tool registry
+        self.tool_registry = create_tool_registry(self.config, self.session_id)
+        
+        # Send session configuration with tools
+        session_config = get_session_config_with_tools(self.tool_registry)
+        await self._send_json(session_config)
         await self._send_json({"type": "response.create"})
 
         asyncio.create_task(self._receiver_loop())
@@ -125,6 +108,7 @@ class ACSMediaHandler:
                 match event_type:
                     case "session.created":
                         session_id = event.get("session", {}).get("id")
+                        self.session_id = session_id
                         logger.info("[VoiceLiveACSHandler] Session ID: %s", session_id)
 
                     case "input_audio_buffer.cleared":
@@ -143,10 +127,17 @@ class ACSMediaHandler:
                     case "conversation.item.input_audio_transcription.completed":
                         transcript = event.get("transcript")
                         logger.info("User: %s", transcript)
+                        self.conversation_transcript.append(
+                            {"role": "user", "content": transcript}
+                        )
 
                     case "conversation.item.input_audio_transcription.failed":
                         error_msg = event.get("error")
                         logger.warning("Transcription Error: %s", error_msg)
+
+                    case "response.function_call_arguments.done":
+                        # Handle function call completion
+                        await self._handle_function_call(event)
 
                     case "response.done":
                         response = event.get("response", {})
@@ -160,6 +151,9 @@ class ACSMediaHandler:
                     case "response.audio_transcript.done":
                         transcript = event.get("transcript")
                         logger.info("AI: %s", transcript)
+                        self.conversation_transcript.append(
+                            {"role": "assistant", "content": transcript}
+                        )
                         await self.send_message(
                             json.dumps({"Kind": "Transcription", "Text": transcript})
                         )
@@ -221,3 +215,56 @@ class ACSMediaHandler:
         """Encodes raw audio bytes and sends to Voice Live API."""
         audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
         await self.audio_to_voicelive(audio_b64)
+
+    async def _handle_function_call(self, event):
+        """Handles function call events from Voice Live API."""
+        call_id = None
+        try:
+            call_id = event.get("call_id")
+            name = event.get("name")
+            arguments = event.get("arguments")
+
+            logger.info(
+                "Function call received: %s with arguments: %s", name, arguments
+            )
+
+            # Parse arguments if they're a string
+            args = json.loads(arguments) if isinstance(arguments, str) else arguments
+
+            # Execute the tool using the registry
+            result = await self.tool_registry.execute_tool(name, args)
+
+            # Send function call output back to Voice Live
+            output_event = {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps(result),
+                },
+            }
+            await self._send_json(output_event)
+
+            # Request a new response from the assistant
+            await self._send_json({"type": "response.create"})
+
+            logger.info("Tool %s executed successfully", name)
+
+        except ValueError as e:
+            logger.error("Tool not found: %s", str(e))
+            # Send error response back to Voice Live if we have a call_id
+            if call_id:
+                output_event = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(
+                            {"success": False, "message": f"Tool not found: {event.get('name', 'unknown')}"}
+                        ),
+                    },
+                }
+                await self._send_json(output_event)
+                await self._send_json({"type": "response.create"})
+        except Exception:
+            logger.exception("Error handling function call")
