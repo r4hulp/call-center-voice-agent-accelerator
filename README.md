@@ -278,6 +278,19 @@ For example:
 
 <br/>
 
+## Handling Concurrent Calls
+
+This solution is designed to handle **multiple concurrent calls** efficiently. When multiple people dial the ACS phone number simultaneously, each call is processed independently with:
+
+- **Isolated handler instances** - Each call gets its own dedicated handler with independent state
+- **Connection tracking** - Monitor active connections via `/health` and `/stats` endpoints
+- **Horizontal auto-scaling** - Automatic scaling from 1 to 10 replicas based on load
+- **Capacity planning** - Support for up to 100 concurrent calls per instance (1,000 with 10 replicas)
+
+For detailed information about concurrent call handling, architecture, monitoring, and best practices, see the **[Concurrent Calls Documentation](./docs/CONCURRENT_CALLS.md)**.
+
+<br/>
+
 ## Guidance
 
 ### Resource Clean-up
