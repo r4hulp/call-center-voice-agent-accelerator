@@ -7,71 +7,12 @@ import logging
 import uuid
 from datetime import datetime
 
-from app.services.email_service import EmailService
+from app.tools.utils import create_tool_registry, get_session_config_with_tools
 from azure.identity.aio import ManagedIdentityCredential
 from websockets.asyncio.client import connect as ws_connect
 from websockets.typing import Data
 
 logger = logging.getLogger(__name__)
-
-
-def session_config():
-    """Returns the default session configuration for Voice Live."""
-    return {
-        "type": "session.update",
-        "session": {
-            "instructions": (
-                "You are a helpful AI assistant responding in natural, engaging language. "
-                "When the user indicates they want to end the call or when the conversation naturally concludes, "
-                "use the send_email_summary tool to send a summary of the conversation to their email address. "
-                "Ask for their email address if they haven't provided it yet."
-            ),
-            "turn_detection": {
-                "type": "azure_semantic_vad",
-                "threshold": 0.3,
-                "prefix_padding_ms": 200,
-                "silence_duration_ms": 200,
-                "remove_filler_words": False,
-                "end_of_utterance_detection": {
-                    "model": "semantic_detection_v1",
-                    "threshold": 0.01,
-                    "timeout": 2,
-                },
-            },
-            "input_audio_noise_reduction": {"type": "azure_deep_noise_suppression"},
-            "input_audio_echo_cancellation": {"type": "server_echo_cancellation"},
-            "voice": {
-                "name": "en-US-Aria:DragonHDLatestNeural",
-                "type": "azure-standard",
-                "temperature": 0.8,
-            },
-            "tools": [
-                {
-                    "type": "function",
-                    "name": "send_email_summary",
-                    "description": (
-                        "Sends an email with a summary of the call conversation. "
-                        "Use this when the user requests a summary or when the call is ending."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "email": {
-                                "type": "string",
-                                "description": "The recipient's email address",
-                            },
-                            "summary": {
-                                "type": "string",
-                                "description": "A concise summary of the call conversation including key points discussed",
-                            },
-                        },
-                        "required": ["email", "summary"],
-                    },
-                }
-            ],
-            "tool_choice": "auto",
-        },
-    }
 
 
 class ACSMediaHandler:
@@ -88,10 +29,10 @@ class ACSMediaHandler:
         self.incoming_websocket = None
         self.is_raw_audio = True
         self.config = config
-        self.email_service = EmailService(config)
         self.session_id = None
         self.conversation_transcript = []
         self.call_start_time = datetime.now()
+        self.tool_registry = None
 
     def _generate_guid(self):
         return str(uuid.uuid4())
@@ -120,7 +61,12 @@ class ACSMediaHandler:
         self.ws = await ws_connect(url, additional_headers=headers)
         logger.info("[VoiceLiveACSHandler] Connected to Voice Live API")
 
-        await self._send_json(session_config())
+        # Initialize tool registry
+        self.tool_registry = create_tool_registry(self.config, self.session_id)
+        
+        # Send session configuration with tools
+        session_config = get_session_config_with_tools(self.tool_registry)
+        await self._send_json(session_config)
         await self._send_json({"type": "response.create"})
 
         asyncio.create_task(self._receiver_loop())
@@ -281,46 +227,42 @@ class ACSMediaHandler:
                 "Function call received: %s with arguments: %s", name, arguments
             )
 
-            if name == "send_email_summary":
-                # Parse arguments
-                args = json.loads(arguments) if isinstance(arguments, str) else arguments
-                email = args.get("email")
-                summary = args.get("summary")
+            # Parse arguments if they're a string
+            args = json.loads(arguments) if isinstance(arguments, str) else arguments
 
-                # Send email
-                success = await self.email_service.send_email_summary(
-                    to_email=email,
-                    subject="Call Summary",
-                    summary=summary,
-                    call_id=self.session_id,
-                )
+            # Execute the tool using the registry
+            result = await self.tool_registry.execute_tool(name, args)
 
-                # Send function call output back to Voice Live
-                output_event = {
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "function_call_output",
-                        "call_id": call_id,
-                        "output": json.dumps(
-                            {
-                                "success": success,
-                                "message": (
-                                    "Email sent successfully"
-                                    if success
-                                    else "Failed to send email"
-                                ),
-                            }
-                        ),
-                    },
-                }
-                await self._send_json(output_event)
+            # Send function call output back to Voice Live
+            output_event = {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps(result),
+                },
+            }
+            await self._send_json(output_event)
 
-                # Request a new response from the assistant
-                await self._send_json({"type": "response.create"})
+            # Request a new response from the assistant
+            await self._send_json({"type": "response.create"})
 
-                logger.info("Email summary function executed: success=%s", success)
-            else:
-                logger.warning("Unknown function call: %s", name)
+            logger.info("Tool %s executed successfully", name)
 
+        except ValueError as e:
+            logger.error("Tool not found: %s", str(e))
+            # Send error response back to Voice Live
+            output_event = {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps(
+                        {"success": False, "message": f"Tool not found: {name}"}
+                    ),
+                },
+            }
+            await self._send_json(output_event)
+            await self._send_json({"type": "response.create"})
         except Exception:
             logger.exception("Error handling function call")
