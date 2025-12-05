@@ -2,17 +2,22 @@
 
 This directory contains tools that can be called by the Azure Voice Live API during customer interactions. Tools enable the voice agent to perform actions like sending emails, booking appointments, looking up information, and more.
 
+> **Important**: All current tools are **mock/simulation implementations** for demonstration purposes. They log actions instead of performing real operations. In production, replace these with actual integrations to email services, calendar APIs, databases, etc.
+
 ## Available Tools
 
 ### 1. Email Summary Tool (`email_summary.py`)
-Sends an email with a summary of the call conversation.
+**Simulates** sending an email with a summary of the call conversation.
+- **Implementation**: Mock - logs email content to console instead of sending
 - **Use Case**: When customers request a summary or when the call is ending
 - **Parameters**: 
   - `email`: Recipient's email address
   - `summary`: Concise summary of the conversation
+- **Production**: Integrate with SendGrid, AWS SES, SMTP server, or Azure Communication Services Email
 
 ### 2. Appointment Booking Tool (`appointment_booking.py`)
-Books appointments for customers.
+**Simulates** booking appointments for customers.
+- **Implementation**: Mock - stores appointments in memory
 - **Use Case**: When customers want to schedule meetings, consultations, or services
 - **Parameters**: 
   - `customer_name`: Customer's full name
@@ -20,20 +25,25 @@ Books appointments for customers.
   - `time`: Appointment time (HH:MM 24-hour format)
   - `service_type`: Type of service (e.g., consultation, support, demo)
   - `phone`: Customer's phone number (optional)
+- **Production**: Integrate with Microsoft Graph Calendar, Google Calendar API, or your CRM system
 
 ### 3. Knowledge Base Tool (`knowledge_base.py`)
-Looks up information from the company knowledge base.
+Looks up information from an in-memory knowledge base.
+- **Implementation**: Mock - uses hardcoded dictionary for demo
 - **Use Case**: When customers ask about policies, hours, pricing, etc.
 - **Parameters**: 
   - `topic`: Topic to look up (e.g., business_hours, return_policy, shipping)
   - `query`: Additional context (optional)
+- **Production**: Integrate with Azure Cognitive Search, Elasticsearch, or your knowledge base API
 
 ### 4. Order Status Tool (`order_status.py`)
-Checks the status of customer orders.
+**Simulates** checking the status of customer orders.
+- **Implementation**: Mock - uses hardcoded sample orders
 - **Use Case**: When customers want order status, tracking, or delivery information
 - **Parameters**: 
   - `order_id`: Order ID or order number
   - `email`: Customer's email (optional, for verification)
+- **Production**: Integrate with your order management system, Shopify, or e-commerce API
 
 ## How to Add a New Tool
 
