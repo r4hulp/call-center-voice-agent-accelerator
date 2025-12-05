@@ -90,6 +90,10 @@ class ConnectionManager:
         async with self._lock:
             return self._connections.copy()
 
+    def get_max_connections(self) -> int:
+        """Get the maximum number of concurrent connections."""
+        return self._max_connections
+
     def set_max_connections(self, max_connections: int):
         """Set the maximum number of concurrent connections."""
         if max_connections > 0:

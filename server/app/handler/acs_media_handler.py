@@ -16,6 +16,11 @@ from websockets.typing import Data
 logger = logging.getLogger(__name__)
 
 
+class ConnectionLimitExceeded(Exception):
+    """Raised when the maximum number of concurrent connections is reached."""
+    pass
+
+
 class ACSMediaHandler:
     """Manages audio streaming between client and Azure Voice Live API."""
 
@@ -100,6 +105,7 @@ class ACSMediaHandler:
         self.caller_id = caller_id
         
         # Register this connection
+        # Connection type: "web" for browser clients (raw PCM audio), "acs" for phone calls (encoded audio)
         connection_type = "web" if is_raw_audio else "acs"
         registered = await self.connection_manager.register_connection(
             self.connection_id, caller_id, connection_type
@@ -110,7 +116,7 @@ class ACSMediaHandler:
                 "Failed to register connection %s - connection limit reached",
                 self.connection_id
             )
-            raise Exception("Connection limit reached. Please try again later.")
+            raise ConnectionLimitExceeded("Connection limit reached. Please try again later.")
         
         self._is_registered = True
         logger.info(
@@ -346,3 +352,7 @@ class ACSMediaHandler:
                 "[connection_id=%s] Error during cleanup",
                 self.connection_id
             )
+
+    def is_registered(self) -> bool:
+        """Check if this connection is registered with the connection manager."""
+        return self._is_registered

@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-from urllib.parse import parse_qs
 
 from app.handler.acs_event_handler import AcsEventHandler
 from app.handler.acs_media_handler import ACSMediaHandler
@@ -108,7 +107,7 @@ async def health():
     return {
         "status": "healthy",
         "active_connections": active_count,
-        "max_connections": conn_manager._max_connections
+        "max_connections": conn_manager.get_max_connections()
     }
 
 
@@ -129,7 +128,7 @@ async def stats():
     return {
         "status": "healthy",
         "active_connections": active_count,
-        "max_connections": conn_manager._max_connections,
+        "max_connections": conn_manager.get_max_connections(),
         "connection_types": connection_types,
         "connections": [
             {

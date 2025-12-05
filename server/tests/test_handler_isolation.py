@@ -122,7 +122,7 @@ async def test_cleanup_does_not_affect_other_handlers(mock_config):
         assert mock_manager.unregister_connection.call_args[0][0] == handler1.connection_id
         
         # handler2 should still be registered
-        assert handler2._is_registered is True
+        assert handler2.is_registered() is True
         assert handler2.connection_id != handler1.connection_id
 
 
