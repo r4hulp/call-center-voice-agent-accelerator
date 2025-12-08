@@ -7,12 +7,18 @@ import logging
 import uuid
 from datetime import datetime
 
+from app.handler.connection_manager import get_connection_manager
 from app.tools.utils import create_tool_registry, get_session_config_with_tools
 from azure.identity.aio import ManagedIdentityCredential
 from websockets.asyncio.client import connect as ws_connect
 from websockets.typing import Data
 
 logger = logging.getLogger(__name__)
+
+
+class ConnectionLimitExceeded(Exception):
+    """Raised when the maximum number of concurrent connections is reached."""
+    pass
 
 
 class ACSMediaHandler:
@@ -33,49 +39,92 @@ class ACSMediaHandler:
         self.conversation_transcript = []
         self.call_start_time = datetime.now()
         self.tool_registry = None
+        self.connection_id = self._generate_guid()  # Unique ID for this connection
+        self.connection_manager = get_connection_manager()
+        self.caller_id = None
+        self._is_registered = False
 
     def _generate_guid(self):
         return str(uuid.uuid4())
 
     async def connect(self):
         """Connects to Azure Voice Live API via WebSocket."""
-        endpoint = self.endpoint.rstrip("/")
-        model = self.model.strip()
-        url = f"{endpoint}/voice-live/realtime?api-version=2025-05-01-preview&model={model}"
-        url = url.replace("https://", "wss://")
+        try:
+            endpoint = self.endpoint.rstrip("/")
+            model = self.model.strip()
+            url = f"{endpoint}/voice-live/realtime?api-version=2025-05-01-preview&model={model}"
+            url = url.replace("https://", "wss://")
 
-        headers = {"x-ms-client-request-id": self._generate_guid()}
+            headers = {"x-ms-client-request-id": self._generate_guid()}
 
-        if self.client_id:
-        # Use async context manager to auto-close the credential
-            async with ManagedIdentityCredential(client_id=self.client_id) as credential:
-                token = await credential.get_token(
-                    "https://cognitiveservices.azure.com/.default"
-                )
-                print(token.token)
-                headers["Authorization"] = f"Bearer {token.token}"
-                logger.info("[VoiceLiveACSHandler] Connected to Voice Live API by managed identity")
-        else:
-            headers["api-key"] = self.api_key
+            if self.client_id:
+            # Use async context manager to auto-close the credential
+                async with ManagedIdentityCredential(client_id=self.client_id) as credential:
+                    token = await credential.get_token(
+                        "https://cognitiveservices.azure.com/.default"
+                    )
+                    print(token.token)
+                    headers["Authorization"] = f"Bearer {token.token}"
+                    logger.info(
+                        "[connection_id=%s] Connected to Voice Live API by managed identity",
+                        self.connection_id
+                    )
+            else:
+                headers["api-key"] = self.api_key
 
-        self.ws = await ws_connect(url, additional_headers=headers)
-        logger.info("[VoiceLiveACSHandler] Connected to Voice Live API")
+            self.ws = await ws_connect(url, additional_headers=headers)
+            logger.info(
+                "[connection_id=%s] Connected to Voice Live API for caller_id=%s",
+                self.connection_id,
+                self.caller_id or "unknown"
+            )
 
-        # Initialize tool registry
-        self.tool_registry = create_tool_registry(self.config, self.session_id)
-        
-        # Send session configuration with tools
-        session_config = get_session_config_with_tools(self.tool_registry)
-        await self._send_json(session_config)
-        await self._send_json({"type": "response.create"})
+            # Initialize tool registry
+            self.tool_registry = create_tool_registry(self.config, self.session_id)
+            
+            # Send session configuration with tools
+            session_config = get_session_config_with_tools(self.tool_registry)
+            await self._send_json(session_config)
+            await self._send_json({"type": "response.create"})
 
-        asyncio.create_task(self._receiver_loop())
-        self.send_task = asyncio.create_task(self._sender_loop())
+            asyncio.create_task(self._receiver_loop())
+            self.send_task = asyncio.create_task(self._sender_loop())
+        except Exception as e:
+            logger.error(
+                "[connection_id=%s] Failed to connect to Voice Live API: %s",
+                self.connection_id,
+                str(e)
+            )
+            await self.cleanup()
+            raise
 
-    async def init_incoming_websocket(self, socket, is_raw_audio=True):
+    async def init_incoming_websocket(self, socket, is_raw_audio=True, caller_id=None):
         """Sets up incoming ACS WebSocket."""
         self.incoming_websocket = socket
         self.is_raw_audio = is_raw_audio
+        self.caller_id = caller_id
+        
+        # Register this connection
+        # Connection type: "web" for browser clients (raw PCM audio), "acs" for phone calls (encoded audio)
+        connection_type = "web" if is_raw_audio else "acs"
+        registered = await self.connection_manager.register_connection(
+            self.connection_id, caller_id, connection_type
+        )
+        
+        if not registered:
+            logger.error(
+                "Failed to register connection %s - connection limit reached",
+                self.connection_id
+            )
+            raise ConnectionLimitExceeded("Connection limit reached. Please try again later.")
+        
+        self._is_registered = True
+        logger.info(
+            "WebSocket initialized: connection_id=%s, type=%s, caller_id=%s",
+            self.connection_id,
+            connection_type,
+            caller_id or "unknown"
+        )
 
     async def audio_to_voicelive(self, audio_b64: str):
         """Queues audio data to be sent to Voice Live API."""
@@ -268,3 +317,42 @@ class ACSMediaHandler:
                 await self._send_json({"type": "response.create"})
         except Exception:
             logger.exception("Error handling function call")
+
+    async def cleanup(self):
+        """Clean up resources and unregister the connection."""
+        try:
+            # Close Voice Live WebSocket
+            if self.ws:
+                await self.ws.close()
+                logger.info(
+                    "[connection_id=%s] Voice Live WebSocket closed",
+                    self.connection_id
+                )
+
+            # Cancel sender task
+            if self.send_task and not self.send_task.done():
+                self.send_task.cancel()
+                try:
+                    await self.send_task
+                except asyncio.CancelledError:
+                    pass
+
+            # Unregister connection
+            if self._is_registered:
+                await self.connection_manager.unregister_connection(self.connection_id)
+                self._is_registered = False
+
+            logger.info(
+                "[connection_id=%s] Cleanup completed for caller_id=%s",
+                self.connection_id,
+                self.caller_id or "unknown"
+            )
+        except Exception:
+            logger.exception(
+                "[connection_id=%s] Error during cleanup",
+                self.connection_id
+            )
+
+    def is_registered(self) -> bool:
+        """Check if this connection is registered with the connection manager."""
+        return self._is_registered

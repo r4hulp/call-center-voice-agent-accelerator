@@ -4,6 +4,7 @@ import os
 
 from app.handler.acs_event_handler import AcsEventHandler
 from app.handler.acs_media_handler import ACSMediaHandler
+from app.handler.connection_manager import get_connection_manager
 from dotenv import load_dotenv
 from quart import Quart, request, websocket
 
@@ -45,16 +46,28 @@ async def acs_event_callbacks(context_id):
 async def acs_ws():
     """WebSocket endpoint for ACS to send audio to Voice Live."""
     logger = logging.getLogger("acs_ws")
-    logger.info("Incoming ACS WebSocket connection")
+    
+    # Extract caller_id from query parameters
+    caller_id = None
+    if websocket.args:
+        caller_id = websocket.args.get("callerId")
+    
+    logger.info("Incoming ACS WebSocket connection from caller_id=%s", caller_id or "unknown")
+    
     handler = ACSMediaHandler(app.config)
-    await handler.init_incoming_websocket(websocket, is_raw_audio=False)
-    asyncio.create_task(handler.connect())
+    
     try:
+        await handler.init_incoming_websocket(websocket, is_raw_audio=False, caller_id=caller_id)
+        asyncio.create_task(handler.connect())
+        
         while True:
             msg = await websocket.receive()
             await handler.acs_to_voicelive(msg)
-    except Exception:
-        logger.exception("ACS WebSocket connection closed")
+    except Exception as e:
+        logger.exception("ACS WebSocket connection error for caller_id=%s: %s", caller_id or "unknown", str(e))
+    finally:
+        await handler.cleanup()
+        logger.info("ACS WebSocket cleanup completed for caller_id=%s", caller_id or "unknown")
 
 
 @app.websocket("/web/ws")
@@ -62,21 +75,72 @@ async def web_ws():
     """WebSocket endpoint for web clients to send audio to Voice Live."""
     logger = logging.getLogger("web_ws")
     logger.info("Incoming Web WebSocket connection")
+    
     handler = ACSMediaHandler(app.config)
-    await handler.init_incoming_websocket(websocket, is_raw_audio=True)
-    asyncio.create_task(handler.connect())
+    
     try:
+        await handler.init_incoming_websocket(websocket, is_raw_audio=True)
+        asyncio.create_task(handler.connect())
+        
         while True:
             msg = await websocket.receive()
             await handler.web_to_voicelive(msg)
-    except Exception:
-        logger.exception("Web WebSocket connection closed")
+    except Exception as e:
+        logger.exception("Web WebSocket connection error: %s", str(e))
+    finally:
+        await handler.cleanup()
+        logger.info("Web WebSocket cleanup completed")
 
 
 @app.route("/")
 async def index():
     """Serves the static index page."""
     return await app.send_static_file("index.html")
+
+
+@app.route("/health")
+async def health():
+    """Health check endpoint with connection statistics."""
+    conn_manager = get_connection_manager()
+    active_count = await conn_manager.get_active_count()
+    
+    return {
+        "status": "healthy",
+        "active_connections": active_count,
+        "max_connections": conn_manager.get_max_connections()
+    }
+
+
+@app.route("/stats")
+async def stats():
+    """Detailed statistics endpoint for monitoring."""
+    conn_manager = get_connection_manager()
+    active_count = await conn_manager.get_active_count()
+    all_connections = await conn_manager.get_all_connections()
+    
+    # Summarize connections by type
+    connection_types = {"acs": 0, "web": 0}
+    for conn_info in all_connections.values():
+        conn_type = conn_info.get("connection_type", "unknown")
+        if conn_type in connection_types:
+            connection_types[conn_type] += 1
+    
+    return {
+        "status": "healthy",
+        "active_connections": active_count,
+        "max_connections": conn_manager.get_max_connections(),
+        "connection_types": connection_types,
+        "connections": [
+            {
+                "connection_id": conn_id,
+                "caller_id": info.get("caller_id"),
+                "type": info.get("connection_type"),
+                "connected_at": info.get("connected_at").isoformat() if info.get("connected_at") else None,
+                "status": info.get("status")
+            }
+            for conn_id, info in all_connections.items()
+        ]
+    }
 
 
 if __name__ == "__main__":
